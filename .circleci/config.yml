@@ -1,0 +1,247 @@
+version: 2.1
+
+orbs:
+  # The python orb contains a set of prepackaged CircleCI configuration you can use repeatedly in your configuration files
+  # Orb commands and jobs help you with common scripting around a language/tool
+  # so you dont have to copy and paste it everywhere.
+  # See the orb documentation here: https://circleci.com/developer/orbs/orb/circleci/python
+    python: circleci/python@1.3.2
+    aws-cli: circleci/aws-cli@1.3.1
+
+executors:
+  python38:
+    docker:
+      - image: circleci/python:3.8
+
+not_main: &not_main
+  filters:
+    branches:
+      ignore:
+        - main
+
+main_only: &main_only
+  filters:
+    branches:
+      only: main
+
+default_job_part: &default_job_part
+  executor: python38
+  working_directory: ~/project/workflows/<< parameters.workflow >>
+
+common_job_part: &common_job_part
+  <<: *default_job_part
+  parameters:
+    workflow:
+      type: string
+
+deploy_job_part: &deploy_job_part
+  <<: *default_job_part
+  parameters:
+    workflow:
+      type: string
+    stage:
+      type: string
+
+shared_user_layer_required: &shared_user_layer_required
+  requires:
+    - infra-setup-user
+
+commands:
+  aws_auth:
+    description: "Set up aws auth"
+    parameters:
+      environment:
+        type: string
+    steps:
+      - aws-cli/setup:
+          profile-name: reporting-tool-poc-<< parameters.environment >>
+          aws-access-key-id: AWS_ACCESS_KEY_ID_<< parameters.environment >>
+          aws-secret-access-key: AWS_SECRET_ACCESS_KEY_<< parameters.environment >>
+          aws-region: AWS_DEFAULT_REGION
+          configure-default-region: true
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - .aws/*
+
+
+workflows:
+  configure-and-deploy-preprod:  # This is the name of the workflow, feel free to change it to better match your workflow.
+    # Inside the workflow, you define the jobs you want to run.
+    # For more details on extending your workflow, see the configuration docs: https://circleci.com/docs/2.0/configuration-reference/#workflows
+    jobs:
+      - infra-setup-job:
+          name: infra-setup-user
+          environment: DEV
+          stage: $CIRCLE_USERNAME
+          context: test-context
+          <<: *not_main
+
+      - test-workflow-job:
+          name: test-vfit-api
+          workflow: vfit-api
+          <<: *not_main
+          <<: *shared_user_layer_required
+
+      - build-workflow-job:
+          name: build-vfit-api
+          workflow: vfit-api
+          requires:
+            - test-vfit-api
+
+      - sam-build-deploy-job:
+          name: sam-deploy-vfit-api-user
+          workflow: vfit-api
+          stage: $CIRCLE_USERNAME
+          context: test-context
+          requires:
+            - build-vfit-api
+
+
+jobs:
+  infra-setup-job:
+    executor: aws-cli/default
+    parameters:
+      environment:
+        type: string
+        default: dev
+      stage:
+        type: string
+        default: dev
+      template_name:
+        type: string
+        default: ""
+      stack_name:
+        type: string
+        default: ""
+      parameter_overrides:
+        type: string
+        default: ""
+    steps:
+      - checkout
+      - aws_auth:
+          environment: << parameters.environment >>
+      - run:
+          name: Source env variables
+          command: |
+            echo "export STAGE=<< parameters.stage >>" >> ${BASH_ENV}
+            echo "export AWS_PROFILE=reporting-tool-poc-<< parameters.environment >>" >> ${BASH_ENV}
+            echo "export AWS_DEFAULT_REGION=us-west-2" >> ${BASH_ENV}
+            cat ${BASH_ENV}
+            source ${BASH_ENV}
+      - run: aws configure list
+
+
+
+
+  test-workflow-job:
+    <<: *common_job_part
+    steps:
+      - checkout:
+          path: ~/project
+      - python/install-packages:
+          pkg-manager: poetry
+          app-dir: ~/project/workflows/<< parameters.workflow >>
+          include-python-in-cache-key: false
+      - run:
+          name: Run black
+          command: poetry run task black
+      - run:
+          name: Run flake8
+          command: poetry run task flake8
+      - run:
+          name: Run cfn-lint
+          command: poetry run task cfn-lint
+      - run:
+          name: Run tests
+          command: poetry run task tests
+
+  build-workflow-job:
+    <<: *common_job_part
+    steps:
+      - checkout:
+          path: ~/project
+      - python/install-packages:
+          pkg-manager: poetry
+          app-dir: ~/project/workflows/<< parameters.workflow >>
+          include-python-in-cache-key: false
+      - run:
+          name: Generate requirements.txt for lambda dependency layer
+          command: poetry run task generate_requirements_txt
+      - run:
+          name: Build lambda dependency layer
+          command: poetry run task generate_lambda_deps
+      - run:
+          name: Checking the .build contents
+          command: find ~/project/workflows/<< parameters.workflow >> -type d
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - project/workflows/<< parameters.workflow >>/.build
+
+  sam-build-deploy-job:
+    <<: *deploy_job_part
+    steps:
+      - checkout:
+          path: ~/project
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Source env variables
+          command: |
+            case "<< parameters.stage >>" in dev|prod) STAGE="<< parameters.stage >>"; PROFILE_NAME="<< parameters.stage >>";; *) STAGE="<< parameters.stage >>"; PROFILE_NAME="DEV";; esac
+            echo "export STAGE=${STAGE}" >> ${BASH_ENV}
+            echo "export PROFILE_NAME=${PROFILE_NAME}" >> ${BASH_ENV}
+            echo "export AWS_PROFILE=reporting-tool-poc-${PROFILE_NAME}" >> ${BASH_ENV}
+            echo "export AWS_DEFAULT_REGION=us-west-2" >> ${BASH_ENV}
+            cat ${BASH_ENV}
+            source ${BASH_ENV}
+      - python/install-packages:
+          pkg-manager: poetry
+          app-dir: ~/project/workflows/<< parameters.workflow >>
+          include-python-in-cache-key: false
+      - run:
+          name: Checking the .build contents
+          command: find ~/project/workflows/<< parameters.workflow >> -type d
+      - run:
+          name: Build app
+          command: poetry run task sam_build
+      - run:
+          name: Deploy app
+          command: poetry run task sam_deploy
+
+  # TODO - Need to remove below job once the workflow completes
+  test-job:  # This is the name of the job, feel free to change it to better match what you're trying to do!
+    # These next lines defines a Docker executors: https://circleci.com/docs/2.0/executor-types/
+    # You can specify an image from Dockerhub or use one of the convenience images from CircleCI's Developer Hub
+    # A list of available CircleCI Docker convenience images are available here: https://circleci.com/developer/images/image/cimg/python
+    # The executor is the environment in which the steps below will be executed - below will use a python 3.9 container
+    # Change the version below to your required version of python
+    #docker:
+    #  - image: cimg/python:3.8
+    executor: python38
+    # Checkout the code as the first step. This is a dedicated CircleCI step.
+    # The python orb's install-packages step will install the dependencies from a Pipfile via Pipenv by default.
+    # Here we're making sure we use just use the system-wide pip. By default it uses the project root's requirements.txt.
+    # Then run your tests!
+    # CircleCI will report the results back to your VCS provider.
+    working_directory: ~/project/workflows/vfit-api
+    steps:
+      - checkout:
+          path: ~/project
+      - python/install-packages:
+          pkg-manager: poetry
+          app-dir: ~/project/workflows/vfit-api
+          include-python-in-cache-key: false
+      - run:
+          name: Run black
+          command: poetry run task black
+      - run:
+          name: Run flake8
+          command: poetry run task flake8
+      - run:
+          name: Run cfn-lint
+          command: poetry run task cfn-lint
+      - run:
+          name: Run tests
+          command: poetry run task tests

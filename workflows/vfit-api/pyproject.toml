@@ -1,0 +1,93 @@
+[tool.poetry]
+name = "vfit_api"
+version = "0.1.0"
+description = ""
+authors = ["Kollipara Tejkumar <tejkumar.kollipara@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+flask_rebar = "^1.12.2"
+aws-wsgi = "^0.2.7"
+fleece = "^0.18.7"
+
+[tool.poetry.dev-dependencies]
+lib = { path = "../lib/", develop = true }
+black = "^21.5b1"
+doit = "^0.33.1"
+flake8 = "^3.8.3"
+bandit = "^1.6.2"
+cfn-lint = "^0.49.1"
+aws-sam-cli = "^1.20.0"
+coverage = "^5.5"
+moto = "^2.0.7"
+pytest = "^6.2.4"
+nose = "^1.3.7"
+requests-mock = "^1.8.0"
+mock = "4.0.3"
+taskipy = "^1.5.1"
+
+
+[tool.taskipy.tasks]
+
+black = "black --check vfit_api"
+
+fmt = "black vfit_api"
+
+clean = "rm -rf ./.build && rm -rf ./.aws-sam"
+
+cfn-lint = """
+  (for tmpl in $(grep -Rl '^AWSTemplateFormatVersion' ./*); do
+    echo Validating $tmpl:
+    cfn-lint $tmpl || exit
+  done)
+  """
+
+flake8 = """flake8 \
+  --max-line-length=88 \
+  --count \
+  --statistics \
+  --exclude .git,__pycache__,.build \
+  .
+  """
+
+generate_requirements_txt = """mkdir -p ./.build &&
+  poetry export --without-hashes -f requirements.txt > ./.build/requirements.txt
+  """
+
+generate_lambda_deps = """pip install \
+  --disable-pip-version-check \
+  -r ./.build/requirements.txt \
+  ../lib/ \
+  -t ./.build/dependencies/python/lib/python3.8/site-packages"""
+
+tests = """STAGE=localtest POWERTOOLS_TRACE_DISABLED=1 coverage run \
+  --source ./vfit_api/ \
+  -m \
+  --branch \
+  pytest -vv &&
+  coverage report -m"""
+
+sam_build = "sam build"
+
+sam_deploy = """sam deploy \
+  --debug \
+  --stack-name "reporting-tool-poc-${STAGE}-vfit-api" \
+  --s3-prefix "${STAGE}" \
+  --s3-bucket "vdo-ops-kollipara" \
+  --parameter-overrides "ParameterKey=Stage,ParameterValue=${STAGE} ParameterKey=AuthorizerStackName,ParameterValue=reporting-tool-poc-${STAGE}-api-authorizer" \
+  --profile "${AWS_PROFILE}" \
+  --region "${AWS_DEFAULT_REGION}" \
+  --capabilities CAPABILITY_AUTO_EXPAND CAPABILITY_NAMED_IAM CAPABILITY_IAM \
+  --no-fail-on-empty-changeset"""
+
+local_deploy = """
+    poetry run task clean
+    poetry run task generate_requirements_txt
+    poetry run task generate_lambda_deps
+    poetry run task sam_build
+    poetry run task sam_deploy
+   """
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

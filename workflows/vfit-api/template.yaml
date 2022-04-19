@@ -1,0 +1,58 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: "vFit API"
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+#  AuthorizerStackName:
+#    Description: "CloudFormation stack that contains arn of Authorizer used in API-Gateway"
+#    Type: String
+#  NetworkStackName:
+#    Description: "CloudFormation stack that contains SubnetIds and Security group"
+#    Type: String
+#    Default: vpc-details
+
+#Conditions:
+#  IsNotUserStage: !Or
+#    - !Equals [ !Ref Stage, "dev" ]
+#    - !Equals [ !Ref Stage, "prod" ]
+#  IsProdStage: !Equals [ !Ref Stage, "prod"]
+
+Resources:
+  PythonDepLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${Stage}-vfit-api-python-dep-layer"
+      CompatibleRuntimes:
+        - python3.8
+      ContentUri: ./.build/dependencies
+      RetentionPolicy: Delete
+
+  VFitApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+
+
+
+  VFitApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${Stage}-vfit-api"
+      CodeUri: ./vfit_api
+      Handler: src/trigger_lambda.handler
+      Runtime: python3.8
+      Layers:
+        - !Ref PythonDepLayer
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+      Events:
+        VFitApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VFitApiGateway
+            Path: /vfit
+            Method: GET
